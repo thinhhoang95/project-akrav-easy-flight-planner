@@ -134,8 +134,8 @@ def load_procedures(data, airport_node, runway, G, w_proc = 0.2, procedure='SID'
                 # Calculate distance between fixes
                 dist = haversine_distance(lat, lon, node_lat, node_lon)
                 
-                # Add bidirectional edges if within 20nm
-                if dist <= 30 and ('type' not in G.nodes[node] or G.nodes[node]['type'] != 'PROC') and node != airport_node:
+                # Add bidirectional edges if within some nautical miles
+                if dist <= 1 and ('type' not in G.nodes[node] or G.nodes[node]['type'] != 'PROC') and node != airport_node:
                     # recall: fix_id is the SID/STAR node, and node is the nearby fix (not a SID/STAR since type is not PROC)
                     if procedure == 'SID' and current_proc_type == 'SID':
                         G.add_edge(fix_id, node,
@@ -172,7 +172,7 @@ def load_procedures(data, airport_node, runway, G, w_proc = 0.2, procedure='SID'
                 if procedure == 'SID':
                     G.add_edge(
                         airport_node, fix_id,
-                        edge_type="PROC",
+                        edge_type="PROC-SID",
                         edge_subtype=current_proc_type,
                         max_alt=0,
                         min_alt=0,
