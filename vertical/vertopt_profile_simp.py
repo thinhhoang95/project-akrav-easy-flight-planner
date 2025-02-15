@@ -29,6 +29,9 @@ from openap import prop
 # -------------------------
 fiche_ac = prop.aircraft("A320")
 fiche_engine = prop.engine("CFM56-5-A1")
+fiche_control = {
+    'k_gamma': 0.05 # P controller gain for flight path angle
+}
 
 # -------------------------
 # 1. Conversion factors and target values
@@ -52,22 +55,30 @@ h_landing_end   = 0.0                 # ground
 # -------------------------
 # 2. Define the aircraft dynamics function (same as before)
 # -------------------------
-def aircraft_dynamics(x, u, wind_s, phi, phase, fiche_engine, fiche_ac, num_engines = 2):
+def aircraft_dynamics(x, u, wind_s, phi, phase, fiche_engine, fiche_ac, fiche_control, num_engines = 2):
     """
     Computes the state derivative for the vertical dynamics.
     x = [v, gamma, h, s, m]
-    u = [T, n_z, beta]
+    u = [T, gamma_ref, beta]
     """
     g = 9.81  # gravitational acceleration (m/s^2)
+
+    # Unpack control parameters
+    k_gamma = fiche_control['k_gamma']
     
     # Unpack state and control
-    v, gamma, h, s, m = x[0], x[1], x[2], x[3], x[4] # speed, flight path angle, altitude, along-path distance, mass
-    T, nz, beta = u[0], u[1], u[2] # thrust, load factor (L/W), configuration parameter
+
+    # v, gamma, h, s, m = x[0], x[1], x[2], x[3], x[4] # speed, flight path angle, altitude, along-path distance, mass
+    v, gamma, h, s, m = x[0], x[1], x[2], x[3], x[4] # speed, reference flight path angle, altitude, along-path distance, mass
+    T, gamma_ref, beta = u[0], u[1], u[2] # thrust, controlled flight path angle, configuration parameter
     
     # --- Drag Model ---
     rho0 = 1.225  # sea-level density [kg/m^3]
     H    = 8500.0 # scale height [m]
     rho  = rho0 * ca.exp(-h/H) # air density [kg/m^3] - exponential model
+
+    # --- Load factor calculation ---
+    nz = -v * k_gamma * (gamma - gamma_ref) + g * ca.cos(gamma_ref)
 
     # --- Lift/Drag Calculations ---
     # Required lift force to maintain load factor nz
@@ -104,7 +115,8 @@ def aircraft_dynamics(x, u, wind_s, phi, phase, fiche_engine, fiche_ac, num_engi
     
     # Dynamics equations
     v_dot     = (T - D) / m - g * ca.sin(gamma)
-    gamma_dot = (g / v) * (nz * ca.cos(phi) - ca.cos(gamma))
+    # gamma_dot = (g / v) * (nz * ca.cos(phi) - ca.cos(gamma))
+    gamma_dot = k_gamma * (gamma_ref - gamma)
     h_dot     = v * ca.sin(gamma)
     s_dot     = v * ca.cos(gamma) + wind_s  # along-path distance, plus wind component
     m_dot     = -fuel_flow
@@ -183,7 +195,7 @@ for phase in phases:
         uk = U[:, k]
         x_next = X[:, k+1]
         # Euler integration:
-        x_next_euler = xk + dt * aircraft_dynamics(xk, uk, wind_s, phi, name, fiche_engine, fiche_ac)
+        x_next_euler = xk + dt * aircraft_dynamics(xk, uk, wind_s, phi, name, fiche_engine, fiche_ac, fiche_control)
         opti.subject_to(x_next == x_next_euler)
     
     # Impose altitude boundary conditions for the phase:
@@ -225,9 +237,9 @@ for phase in phases:
         # Thrust bounds [N]
         opti.subject_to(U[0, k] >= 0)
         opti.subject_to(U[0, k] <= 100000)
-        # Load factor bounds
-        opti.subject_to(U[1, k] >= 1.0)
-        opti.subject_to(U[1, k] <= 2.5)
+        # Flight path angle bounds
+        opti.subject_to(U[1, k] >= -0.5)
+        opti.subject_to(U[1, k] <= 0.5)
         # Beta (e.g., speedbrake parameter) bounds
         opti.subject_to(U[2, k] >= 0.0)
         opti.subject_to(U[2, k] <= 0.5)
@@ -245,11 +257,12 @@ for i in range(1, num_phases):
 # -------------------------
 # 7. Impose boundary conditions on takeoff and landing phases
 # -------------------------
-# For take-off: initial state: v=0, gamma=0, h=0, s=0, m = initial mass (say 70000 kg)
-x0 = np.array([0.0, 0.0, 0.0, 0.0, 70000.0])
+# For take-off: initial state: v=30, gamma=0, h=0, s=0, m = initial mass (say 70000 kg)
+x0 = np.array([30.0, 0.0, 0.0, 0.0, 70000.0])
 opti.set_initial(X_list[0][:, 0], x0)
-opti.subject_to(X_list[0][0, 0] == 0.0)   # speed at takeoff start = 0
+opti.subject_to(X_list[0][0, 0] == 30.0)   # speed at takeoff start = 30m/s
 opti.subject_to(X_list[0][3, 0] == 0.0)   # along-path distance starts at 0
+opti.subject_to(X_list[0][2, 0] == 0.0)   # altitude starts at 0
 
 # For take-off, we want the final speed to be the target for climb1 (v_250):
 # (Even though we did not force v in takeoff phase, we can impose its terminal value.)
@@ -315,23 +328,104 @@ for i, phase in enumerate(phases):
     # For controls, use moderate values.
     U = U_list[i]
     for k in range(N_phase):
-        opti.set_initial(U[0, k], 50000.0)  # thrust guess
-        opti.set_initial(U[1, k], 1.0)       # load factor guess
+        opti.set_initial(U[0, k], 50000.0)   # thrust guess
+        opti.set_initial(U[1, k], 0.0)       # flight path angle guess
         opti.set_initial(U[2, k], 0.0)       # beta guess
 
 # -------------------------
 # 10. Solve the NLP
 # -------------------------
 p_opts = {"expand": True}
-s_opts = {"max_iter": 2000, "print_level": 5}
+s_opts = {"max_iter": 2000, "print_level": 5, "tol":1e-6, "acceptable_tol":1e-4}  #Added tolerance
 opti.solver('ipopt', p_opts, s_opts)
 
+# -------------------------
+# Debugging information
+# -------------------------
+
+
 try:
-    sol = opti.debug.solve()
+    sol = opti.solve()  # Use opti.solve() for the regular solution
 except RuntimeError as e:
     print("Solver error:", e)
-    sol = opti.debug
-    pass
+
+    # Inspect values at the point where the error occurred
+    print("\n--- Debugging Information ---")
+    for i, phase in enumerate(phases):
+        print(f"\nPhase: {phase['name']}")
+        X_debug = opti.debug.value(X_list[i])
+        U_debug = opti.debug.value(U_list[i])
+        T_debug = opti.debug.value(T_list[i])
+
+        print("  States (X):")
+        print(X_debug)
+        print("  Controls (U):")
+        print(U_debug)
+        print(f"  Duration (T): {T_debug}")
+
+        # Check for NaNs in states and controls *at each stage*
+        for k in range(phase['N'] + 1):  # Check all state nodes
+            if k < phase['N']: #controls only go to N-1
+              if np.isnan(U_debug[:, k]).any():
+                  print(f"    NaN detected in Controls at stage k={k}")
+            if np.isnan(X_debug[:, k]).any():
+                print(f"    NaN detected in States at stage k={k}")
+
+
+        # Evaluate the dynamics function at problematic points to identify the source of NaNs
+        if np.isnan(X_debug).any() or np.isnan(U_debug).any():
+          print("\n  Checking Dynamics Function:")
+          for k in range(phase['N']):
+            xk = X_debug[:,k]
+            uk = U_debug[:,k]
+            if np.isnan(xk).any() or np.isnan(uk).any():
+                print(f"   - Found NaN in inputs to dynamics at k={k}")
+
+            # Evaluate individual terms in dynamics function for debugging
+            dyn_func = aircraft_dynamics(xk, uk, opti.debug.value(wind_s), opti.debug.value(phi), phase['name'], fiche_engine, fiche_ac, fiche_control)
+            dyn_values = opti.debug.value(dyn_func)
+
+            if np.isnan(dyn_values).any():
+              print(f"    Dynamics evaluation at k={k} results in NaNs:")
+              print(f"      v_dot: {dyn_values[0]}")
+              print(f"      gamma_dot: {dyn_values[1]}")
+              print(f"      h_dot: {dyn_values[2]}")
+              print(f"      s_dot: {dyn_values[3]}")
+              print(f"      m_dot: {dyn_values[4]}")
+
+              #Further break down
+              g = 9.81
+              k_gamma = fiche_control['k_gamma']
+              v, gamma, h, s, m = xk[0], xk[1], xk[2], xk[3], xk[4]
+              T, gamma_ref, beta = uk[0], uk[1], uk[2]
+              rho0 = 1.225
+              H = 8500.0
+              rho = rho0 * np.exp(-h / H)  # Use numpy for scalar calculations during debugging
+              nz = -v * k_gamma * (gamma - gamma_ref) + g * np.cos(gamma_ref)
+              L = nz * m * g
+              epsilon = 1e-6
+              v_sq = v**2 + epsilon
+              S_area = fiche_ac['wing']['area']
+              Cl = L / (0.5 * rho * v_sq * S_area)
+              k_drag = fiche_ac['drag']['k']
+              Cd = fiche_ac['drag']['cd0'] + beta + k_drag * Cl**2
+              D = 0.5 * rho * v**2 * S_area * Cd
+
+              print(f"      Intermediate values at k={k}:")
+              print(f"        rho: {rho}")
+              print(f"        nz: {nz}")
+              print(f"        L: {L}")
+              print(f"        v_sq: {v_sq}")
+              print(f"        Cl: {Cl}")
+              print(f"        Cd: {Cd}")
+              print(f"        D: {D}")
+              # Add more intermediate value printouts as needed
+
+
+
+    sol = opti.debug  # Use opti.debug to access variable values after the error
+    #exit() #Commented this so plots still generated
+
 
 # -------------------------
 # 11. Retrieve and plot the results
@@ -352,10 +446,17 @@ phase_boundaries = [0]
 
 for i, phase in enumerate(phases):
     N_phase = phase["N"]
-    T_phase_val = sol.value(T_list[i])
+    try:
+      T_phase_val = sol.value(T_list[i]) #Try to get solution values
+    except:
+      T_phase_val = opti.debug.value(T_list[i]) #If it fails, get debug
+
     dt = T_phase_val / N_phase
     time_phase = np.linspace(0, T_phase_val, N_phase+1) + t_total
-    X_phase = sol.value(X_list[i])
+    try:
+      X_phase = sol.value(X_list[i])  #Try to get solution values
+    except:
+      X_phase = opti.debug.value(X_list[i]) #If it fails, get debug values
     t_total += T_phase_val
     phase_boundaries.append(t_total)
     
@@ -393,4 +494,7 @@ plt.show()
 
 # Optionally, print phase durations:
 for i, phase in enumerate(phases):
-    print(f"Phase {i+1} ({phase['name']}): Duration = {sol.value(T_list[i]):.2f} s")
+    try:
+      print(f"Phase {i+1} ({phase['name']}): Duration = {sol.value(T_list[i]):.2f} s")
+    except:
+      print(f"Phase {i+1} ({phase['name']}): Duration = {opti.debug.value(T_list[i]):.2f} s")

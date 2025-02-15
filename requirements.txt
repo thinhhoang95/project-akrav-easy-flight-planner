@@ -6,3 +6,5 @@ pandas
 scipy
 scikit-learn
 tqdm
+casadi
+openap
