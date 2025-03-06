@@ -90,3 +90,38 @@ def format_flightplan(route_points):
                 formatted_route[-1] = get_first_part(point['to_node'])
                 
     return remove_same_waypoints(' '.join(formatted_route))
+
+from utils.haversine import haversine_distance
+
+def get_detailed_flightplan_from_waypoint_list(route_graph, route):
+    result = []
+    cumulative_cost = 0
+    cumulative_distance = 0
+    for i in range(len(route)-1):
+        from_node = route[i]
+        to_node = route[i+1]
+        
+        # Get node coordinates
+        from_lat = float(route_graph.nodes[from_node]['lat'])
+        from_lon = float(route_graph.nodes[from_node]['lon'])
+        to_lat = float(route_graph.nodes[to_node]['lat'])
+        to_lon = float(route_graph.nodes[to_node]['lon'])
+        
+        # Get edge data
+        edge_data = route_graph.edges[from_node, to_node]
+        cumulative_cost += edge_data['cost']
+        cumulative_distance += edge_data.get('distance', haversine_distance(from_lat, from_lon, to_lat, to_lon))
+
+        result.append({
+            'from_node': from_node,
+            'to_node': to_node,
+            'from_lat': from_lat,
+            'from_lon': from_lon,
+            'to_lat': to_lat,
+            'to_lon': to_lon,
+            'distance': edge_data.get('distance', haversine_distance(from_lat, from_lon, to_lat, to_lon)),
+            'cost': edge_data['cost'],
+            'edge_type': edge_data['edge_type'],
+            'airway': edge_data['airway'],
+        })
+    return result
