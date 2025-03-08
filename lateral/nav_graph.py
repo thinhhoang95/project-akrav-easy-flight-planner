@@ -557,3 +557,13 @@ def plan_e2e(ORIGIN_ICAO, DEST_ICAO, ORIGIN_RWY, DEST_RWY,
     return result, cumulative_cost, cumulative_distance
 
 
+def add_predecessor_access_for_graph(G):
+    predecessors_map = {}
+    for source_node in tqdm(G.nodes(), desc=f'Processing predecessors list'):
+            for target_node in G.successors(source_node):
+                if target_node not in predecessors_map:
+                    predecessors_map[target_node] = []
+                predecessors_map[target_node].append(source_node)
+                
+    G._predecessors_map = predecessors_map # inplace, no need to return anything
+    
