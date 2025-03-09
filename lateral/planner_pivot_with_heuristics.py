@@ -111,8 +111,117 @@ def find_admissible_pivot_nodes(G, node_from, nodes_to_exclude, max_depth = 8,
     return list(admissible_nodes), dict_distances
 
 
-import networkx as nx
 
+import math
+
+def find_admissible_pivot_nodes_with_heuristics(G, node_from, nodes_to_exclude, max_depth=8, 
+                                prevent_backtracking=False, origin=None, dest=None,
+                                direction='forward', branching_factor=None, heuristic=None):
+    """
+    Finds admissible pivot nodes using a layered expansion (BFS-like) combined with 
+    a heuristic to prioritize node expansion within each depth level.
+    
+    Parameters:
+        G: NetworkX graph with nodes having 'lat' and 'lon' attributes.
+        node_from (str): Starting node.
+        nodes_to_exclude (set): Nodes to avoid during expansion.
+        max_depth (int): Maximum depth (number of layers) to search.
+        prevent_backtracking (bool): Whether to prevent backtracking via directional checks.
+        origin (str): Name of the origin waypoint (used in directional check).
+        dest (str): Name of the destination waypoint (used in directional check).
+        direction (str): 'forward' (use successors) or 'backward' (use predecessors).
+        branching_factor (int): Maximum number of nodes to explore per depth layer.
+        heuristic (callable): Function that accepts (node, current_distance) and returns a numeric score.
+                              Lower scores mean higher priority.
+                              If None and dest is provided, a default heuristic is used.
+    
+    Returns:
+        admissible_nodes (list): List of nodes that were admissibly reached.
+        dict_distances (dict): Mapping of node -> (depth, total_distance)
+    """
+    # Initialize with starting node at depth 0 and distance 0.
+    dict_distances = {node_from: (0, 0)}  # node: (depth, total_distance)
+    buff = [node_from]  # current layer of nodes to expand
+    admissible_nodes = set()  # use a set to avoid duplicates
+
+    def euclidean_distance(latlon1, latlon2):
+        return math.sqrt((latlon1[0]-latlon2[0])**2 + (latlon1[1]-latlon2[1])**2)
+    
+    # If no heuristic is provided but we have a destination, define a default one.
+    if heuristic is None:
+        if dest is not None:
+            # For forward search, target is dest; for backward, use origin.
+            target = dest if direction == 'forward' else origin
+            def default_heuristic(node, current_distance):
+                node_coord = (G.nodes[node]['lat'], G.nodes[node]['lon'])
+                target_coord = (G.nodes[target]['lat'], G.nodes[target]['lon'])
+                # Combine current distance with Euclidean distance as the heuristic score.
+                return current_distance + euclidean_distance(node_coord, target_coord)
+            heuristic = default_heuristic
+        else:
+            # If no target is provided, use the accumulated distance as the heuristic.
+            heuristic = lambda node, current_distance: current_distance
+
+    while buff:
+        next_level = []
+        # Peek at current depth from any node in the current level.
+        current_depth = dict_distances[buff[0]][0]
+        if current_depth >= max_depth:
+            break
+
+        for node in buff:
+            # Skip nodes with an underscore (e.g., SID/STAR nodes)
+            if '_' in node:
+                continue
+
+            # Determine neighbors based on the search direction.
+            if direction == 'forward':
+                neighbors = G.successors(node)
+            else:
+                # For backward, use predecessors if available.
+                neighbors = G._predecessors_map[node] if node in G._predecessors_map else []
+
+            # Process neighbors.
+            for neighbor in neighbors:
+                if neighbor in nodes_to_exclude:
+                    continue  # Skip excluded nodes
+
+                if prevent_backtracking:
+                    # Check if the neighbor is going in the proper direction.
+                    if direction == 'forward':
+                        backtrack = not is_same_direction_by_wp_name(G, origin, dest, node, neighbor)
+                    else:
+                        backtrack = not is_same_direction_by_wp_name(G, dest, origin, node, neighbor)
+                    if backtrack:
+                        continue  # Skip neighbor that is "turning around"
+
+                # Compute the new path's distance.
+                if direction == 'forward':
+                    edge_distance = G.edges[node, neighbor].get('distance', 1)
+                else:
+                    edge_distance = G.edges[neighbor, node].get('distance', 1)
+                new_distance = dict_distances[node][1] + edge_distance
+                new_depth = current_depth + 1
+
+                # Update if the neighbor is either new or if a better route is found.
+                if (neighbor not in dict_distances or 
+                    new_depth < dict_distances[neighbor][0] or 
+                    (new_depth == dict_distances[neighbor][0] and new_distance < dict_distances[neighbor][1])):
+                    dict_distances[neighbor] = (new_depth, new_distance)
+                    next_level.append(neighbor)
+                    admissible_nodes.add(neighbor)
+
+        # Within the current layer, prioritize nodes using the heuristic.
+        # Remove duplicates while preserving order.
+        unique_next_level = list(set(next_level))
+        unique_next_level.sort(key=lambda n: heuristic(n, dict_distances[n][1]))
+        # If a branching factor is provided, only keep the top candidates.
+        if branching_factor is not None:
+            unique_next_level = unique_next_level[:branching_factor]
+
+        buff = unique_next_level
+
+    return list(admissible_nodes), dict_distances
 
 
 import networkx as nx
@@ -496,15 +605,25 @@ def mcmc_step(route_graph, route, temperature = 1000, max_depth = 4,
     # FORWARD AND BACKWARD ADMISSIBLE PIVOT NODES
     # ================================
     nodes_to_exclude = set(route[:a]) | set(route[c:])
-    admissible_nodes_forward, forward_distances = find_admissible_pivot_nodes(route_graph, route[a-1], nodes_to_exclude,
-                                                                          max_depth=max_depth, prevent_backtracking = False, origin = route[a-1], dest = route[c])
+    admissible_nodes_forward, forward_distances = find_admissible_pivot_nodes_with_heuristics(route_graph, route[a-1], nodes_to_exclude,
+                                                                          max_depth=max_depth, prevent_backtracking = False,
+                                                                          origin = route[a-1], dest = route[c],
+                                                                          branching_factor = 16)
     if verbose:
         print(f'Time taken to find forward admissible nodes: {time.time() - start_time}')
+        print(f'Total forward admissible nodes: {len(admissible_nodes_forward)}')
+        for node in admissible_nodes_forward[:10]:
+            print(f'  {node}: {forward_distances[node]}')
     start_time = time.time()
-    admissible_nodes_backward, backward_distances = find_admissible_pivot_nodes(route_graph, route[c], nodes_to_exclude,
-                                                                          max_depth=max_depth, prevent_backtracking = False, origin = route[a-1], dest = route[c], direction = 'backward')
+    admissible_nodes_backward, backward_distances = find_admissible_pivot_nodes_with_heuristics(route_graph, route[c], nodes_to_exclude,
+                                                                          max_depth=max_depth, prevent_backtracking = False,
+                                                                          origin = route[a-1], dest = route[c], direction = 'backward',
+                                                                          branching_factor = 16)
     if verbose:
         print(f'Time taken to find backward admissible nodes: {time.time() - start_time}')
+        print(f'Total backward admissible nodes: {len(admissible_nodes_backward)}')
+        for node in admissible_nodes_backward[:10]:
+            print(f'  {node}: {backward_distances[node]}')
     start_time = time.time()
     # Find the intersection of forward and backward admissible nodes
     V = set(admissible_nodes_forward) & set(admissible_nodes_backward)
@@ -522,6 +641,11 @@ def mcmc_step(route_graph, route, temperature = 1000, max_depth = 4,
     
     # Collapse pivot nodes with similar distances
     V_distances_collapsed, node_to_collapsed_node_mapping = collapse_pivot_options(V_distances)
+
+    if len(V_distances_collapsed) == 0:
+        if verbose:
+            print('No admissible pivot nodes found! Skipping the move.')
+        return route, False
 
     if verbose:
         print(f'Found {len(V_distances_collapsed)} collapsed pivot nodes')
