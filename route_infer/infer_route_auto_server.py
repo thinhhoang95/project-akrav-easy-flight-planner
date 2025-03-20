@@ -1,13 +1,9 @@
-from dotenv import load_dotenv
 import os
 import pandas as pd
 import multiprocessing
-load_dotenv()
-PROJECT_ROOT = os.getenv('PROJECT_ROOT')
 
 # Add PROJECT_ROOT to the Python path
 import sys
-sys.path.append(PROJECT_ROOT)
 
 import networkx as nx
 
@@ -30,9 +26,6 @@ def get_all_csv_files(folder_path):
         # Filter for CSV files
         for file in files:
             if file.lower().endswith('.csv'):
-                # Skip hidden files (those starting with ._)
-                if file.startswith('._'):
-                    continue
                 # Append the full path to the list
                 csv_files.append(os.path.join(root, file))
     
@@ -58,7 +51,7 @@ def process_one_csv_file(args):
         return f"Skipped {csv_file_path} (outputs already exist)"
     
     routes_df = pd.read_csv(csv_file_path)
-    from infer_route5 import find_route
+    from infer_route4 import find_route
     from tqdm import tqdm
 
     # Get unique flight IDs from the CSV
@@ -67,7 +60,7 @@ def process_one_csv_file(args):
     df_all_routes = pd.DataFrame(columns=['flight_id', 'real_waypoints', 'real_full_waypoints'])
     # df_synth_wps = pd.DataFrame(columns=['id', 'lat', 'lon'])
 
-    for flight_id in tqdm(flight_ids[:40], desc=f"Processing {os.path.basename(csv_file_path)}"):
+    for flight_id in tqdm(flight_ids, desc=f"Processing {os.path.basename(csv_file_path)}"):
         selected_flight_df = routes_df[routes_df['id'] == flight_id]
         real_waypoints, final_route, new_nodes = find_route(G, selected_flight_df, 
                                                                                 error_threshold=15,
@@ -106,6 +99,7 @@ def process_one_csv_file(args):
     return f"Processed {csv_file_path}"
 
 if __name__ == '__main__':
+
     import sys
     import os
     
@@ -113,9 +107,9 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         input_folder = sys.argv[1]
     else:
-        input_folder = os.path.join(PROJECT_ROOT, 'data', 'routes_data')
+        input_folder = os.path.join('routes')
     
-    output_folder = os.path.join(PROJECT_ROOT, 'data', 'output')
+    output_folder = os.path.join('output')
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
@@ -126,7 +120,7 @@ if __name__ == '__main__':
     tasks = [(csv_file, output_folder) for csv_file in csv_files]
     
     # Define graph path for worker initialization
-    graph_path = os.path.join(PROJECT_ROOT, 'data', 'graphs', 'ats_fra_nodes_only.gml')
+    graph_path = os.path.join('ats_fra_nodes_only.gml')
     
     # Process CSV files using multiprocessing
     pool = multiprocessing.Pool(initializer=init_worker, initargs=(graph_path,))

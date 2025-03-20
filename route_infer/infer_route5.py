@@ -4,6 +4,13 @@ import random
 import string
 from math import radians, sin, cos, sqrt, atan2, inf, asin
 
+import math
+
+# Helper function for spatial indexing
+def get_cell(lat, lon, cell_size):
+    """Return a tuple (cell_x, cell_y) for the given latitude and longitude based on cell_size in degrees."""
+    return (int(math.floor(lat / cell_size)), int(math.floor(lon / cell_size)))
+
 # Constant: Earth's radius in nautical miles.
 EARTH_RADIUS_NM = 3440.065
 
@@ -39,37 +46,51 @@ def generate_random_node_name(num_chars=8):
     """
     return '_' + ''.join(random.choices(string.ascii_uppercase + string.digits + string.ascii_lowercase, k=num_chars))
 
-def find_best_candidate(point, graph, radius):
+def find_best_candidate(point, graph, radius, spatial_index, cell_size):
     """
-    Find the closest node in the graph to a given point within a specified radius.
+    Find the closest node in the graph to a given point within a specified radius using a spatial index.
     
     Parameters:
         point: Tuple (lat, lon) of the point to find candidates for
         graph: NetworkX graph containing nodes with lat/lon attributes
         radius: Maximum search radius in nautical miles
+        spatial_index: Dictionary mapping cell coordinates to lists of nodes [(node, lat, lon), ...]
+        cell_size: The size of each cell in degrees
     
     Returns:
-        tuple: (node_name, error_distance) where node_name is the closest node 
-               within radius, and error_distance is the distance in nautical miles.
-               If no nodes are found within radius, returns (None, inf).
+        tuple: (node_name, error_distance) where node_name is the closest node within radius,
+               and error_distance is the distance in nautical miles. If no nodes are found within radius,
+               returns (None, inf).
     """
-    
     lat, lon = point
     best_node = None
     best_error = inf
-    for node, data in graph.nodes(data=True):
-        if "lat" not in data or "lon" not in data:
-            continue
-        dist = haversine_distance(lat, lon, data["lat"], data["lon"])
-        if dist <= radius and dist < best_error:
-            best_error = dist
-            best_node = node
+    
+    # Convert search radius (NM) to degrees (approximation: 1 deg latitude ~ 60 NM)
+    degrees_radius = radius / 60.0
+    
+    # Get the base cell of the point
+    base_cell = get_cell(lat, lon, cell_size)
+    
+    # Determine how many cells to search in each direction (be generous by adding 1 extra cell)
+    cell_range = int(math.ceil(degrees_radius / cell_size)) + 1
+    
+    # Search in adjacent cells
+    for i in range(base_cell[0] - cell_range, base_cell[0] + cell_range + 1):
+        for j in range(base_cell[1] - cell_range, base_cell[1] + cell_range + 1):
+            cell = (i, j)
+            if cell in spatial_index:
+                for node, node_lat, node_lon in spatial_index[cell]:
+                    dist = haversine_distance(lat, lon, node_lat, node_lon)
+                    if dist <= radius and dist < best_error:
+                        best_error = dist
+                        best_node = node
     return best_node, best_error
 
 def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=12, min_radius=2):
     """
-    Process flight segments to create a route by matching segments to existing 
-    waypoints or creating new nodes when necessary.
+    Process flight segments to create a route by matching segments to existing waypoints or
+    creating new nodes when necessary, using spatial indexing to improve performance.
     
     Parameters:
         graph: NetworkX graph containing existing waypoint nodes
@@ -86,10 +107,20 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
     """
     # Directly use the input graph as the new graph.
     new_graph = graph
-
     full_route = []
-
     new_nodes = {}
+    
+    # Define cell size for the spatial index (in degrees). Adjust as needed.
+    cell_size = 0.5
+    spatial_index = {}
+    
+    # Build spatial index from existing graph nodes
+    for node, data in new_graph.nodes(data=True):
+        if "lat" in data and "lon" in data:
+            cell = get_cell(data["lat"], data["lon"], cell_size)
+            if cell not in spatial_index:
+                spatial_index[cell] = []
+            spatial_index[cell].append((node, data["lat"], data["lon"]))
     
     # Process each flight segment (each row in the dataframe).
     for idx, row in segments_df.iterrows():
@@ -100,12 +131,12 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
         # Compute the segment length (great circle distance)
         seg_length = haversine_distance(*point_A, *point_B)
         
-        # Search radius: 10% of segment length, capped at 7 NM.
+        # Search radius: 10% of segment length, capped between min_radius and max_radius.
         search_radius = max(min(0.1 * seg_length, max_radius), min_radius)
         
-        # Find best candidate for each endpoint
-        cand_A, error_A = find_best_candidate(point_A, new_graph, search_radius)
-        cand_B, error_B = find_best_candidate(point_B, new_graph, search_radius)
+        # Find best candidate for each endpoint using the spatial index
+        cand_A, error_A = find_best_candidate(point_A, new_graph, search_radius, spatial_index, cell_size)
+        cand_B, error_B = find_best_candidate(point_B, new_graph, search_radius, spatial_index, cell_size)
         
         # If no candidate is found, treat that endpoint as requiring a new node.
         if cand_A is None:
@@ -118,8 +149,8 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
         
         # If the error is within threshold, we use the candidate pair (or new node if candidate missing)
         if total_error <= error_threshold:
-            node_A = cand_A if cand_A is not None else generate_and_add_node(new_nodes, point_A)
-            node_B = cand_B if cand_B is not None else generate_and_add_node(new_nodes, point_B)
+            node_A = cand_A if cand_A is not None else generate_and_add_node(new_nodes, point_A, new_graph, spatial_index, cell_size)
+            node_B = cand_B if cand_B is not None else generate_and_add_node(new_nodes, point_B, new_graph, spatial_index, cell_size)
             number_of_nodes_added = 0
         else:
             # Try the two options of adding one new node:
@@ -131,32 +162,28 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
             if min(opt1_error, opt2_error) < error_threshold:
                 if opt1_error <= opt2_error:
                     # Choose Option 1: new node for A.
-                    node_A = generate_and_add_node(new_nodes, point_A)
+                    node_A = generate_and_add_node(new_nodes, point_A, new_graph, spatial_index, cell_size)
                     node_B = cand_B
                     total_error = 0 + error_B
                     number_of_nodes_added = 1
                 else:
                     # Option 2: new node for B.
                     node_A = cand_A
-                    node_B = generate_and_add_node(new_nodes, point_B)
+                    node_B = generate_and_add_node(new_nodes, point_B, new_graph, spatial_index, cell_size)
                     total_error = error_A + 0
                     number_of_nodes_added = 1
             else:
-                # If neither option brings the error below threshold,
-                # add new nodes for both endpoints.
-                node_A = generate_and_add_node(new_nodes, point_A)
-                node_B = generate_and_add_node(new_nodes, point_B)
+                # If neither option brings the error below threshold, add new nodes for both endpoints.
+                node_A = generate_and_add_node(new_nodes, point_A, new_graph, spatial_index, cell_size)
+                node_B = generate_and_add_node(new_nodes, point_B, new_graph, spatial_index, cell_size)
                 total_error = 0  # error is now 0 as both are exact.
                 number_of_nodes_added = 2
-
+        
         # Add an edge between the chosen nodes if it doesn't exist.
         if not new_graph.has_edge(node_A, node_B):
-            # You can also attach additional attributes such as segment id, error, etc.
-            edge_attrs = {
-                "distance": seg_length
-            }
+            edge_attrs = { "distance": seg_length }
             new_graph.add_edge(node_A, node_B, **edge_attrs)
-    
+        
         # Calculate the actual distance between the chosen nodes
         distance_AB = haversine_distance(
             new_graph.nodes[node_A].get("lat", new_nodes.get(node_A, {}).get("lat")),
@@ -165,7 +192,7 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
             new_graph.nodes[node_B].get("lon", new_nodes.get(node_B, {}).get("lon"))
         )
         full_route.append((node_A, node_B, distance_AB))
-
+    
     return full_route, new_nodes
 
 def consolidate_nodes(route, nodes):
@@ -208,21 +235,32 @@ def consolidate_nodes(route, nodes):
     return new_route, new_nodes
     
 
-def generate_and_add_node(new_nodes, point):
+def generate_and_add_node(new_nodes, point, graph, spatial_index, cell_size):
     """
-    Generate a new node with a random name and add it at the specified coordinates.
+    Generate a new node with a random name, add it to the new_nodes dict and the graph,
+    and update the spatial index accordingly.
     
     Parameters:
         new_nodes: Dictionary to store the new node information
         point: Tuple (lat, lon) specifying the location for the new node
+        graph: The NetworkX graph where the node should be added
+        spatial_index: The spatial index dictionary to update
+        cell_size: The size of each cell in degrees
     
     Returns:
         str: Name of the newly created node
     """
     new_name = generate_random_node_name()
     lat, lon = point
-    # Append the new node to the new_nodes dictionary.
     new_nodes[new_name] = {"lat": lat, "lon": lon}
+    # Add new node to the graph so it can be found in subsequent queries
+    graph.add_node(new_name, lat=lat, lon=lon)
+    
+    cell = get_cell(lat, lon, cell_size)
+    if cell not in spatial_index:
+        spatial_index[cell] = []
+    spatial_index[cell].append((new_name, lat, lon))
+    
     return new_name
 
 def initial_bearing(lat1, lon1, lat2, lon2):
