@@ -8,3 +8,4 @@ scikit-learn
 tqdm
 casadi
 openap
+python_dotenv
