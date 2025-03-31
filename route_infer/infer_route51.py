@@ -97,7 +97,7 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
     Parameters:
         graph: NetworkX graph containing existing waypoint nodes
         segments_df: DataFrame containing flight segments with columns:
-                     from_lat, from_lon, to_lat, to_lon
+                     from_lat, from_lon, to_lat, to_lon, from_time, to_time, from_speed, to_speed
         error_threshold: Maximum acceptable total error (in NM) for using existing waypoints
         max_radius: Maximum search radius (in NM) for finding candidate waypoints
         min_radius: Minimum search radius (in NM) for finding candidate waypoints
@@ -111,6 +111,8 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
     new_graph = graph
     full_route = []
     new_nodes = {}
+    pass_times = []
+    speeds = []
 
     # start_time = time.time()
     # Process each flight segment (each row in the dataframe).
@@ -118,7 +120,13 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
         # Flight endpoints (using latitude, longitude)
         point_A = (row["from_lat"], row["from_lon"])
         point_B = (row["to_lat"], row["to_lon"])
-        
+        time_A = row["from_time"]
+        time_B = row["to_time"]
+        spd_A = row["from_speed"]
+        spd_B = row["to_speed"]
+        pass_times.append((time_A, time_B))
+        speeds.append((spd_A, spd_B))
+
         # Compute the segment length (great circle distance)
         seg_length = haversine_distance(*point_A, *point_B)
         
@@ -184,20 +192,24 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
         )
         full_route.append((node_A, node_B, distance_AB))
     # print(f'Route processed in {time.time() - start_time} seconds')
-    return full_route, new_nodes
+    return full_route, new_nodes, pass_times, speeds
 
-def consolidate_nodes(route, nodes):
+def consolidate_nodes(route, nodes, pass_times, speeds):
     """
     Consolidate nodes by removing duplicates with the same lat/lon coordinates.
     
     Parameters:
         route: List of tuples (node_A, node_B, distance)
         nodes: Dictionary of nodes with their coordinates {node_name: {'lat': lat, 'lon': lon}}
+        pass_times: List of tuples (time_A, time_B)
+        speeds: List of tuples (speed_A, speed_B)
     
     Returns:
-        tuple: (new_route, new_nodes) where:
+        tuple: (new_route, new_nodes, new_pass_times, new_speeds) where:
                - new_route is the updated route with consolidated node names
                - new_nodes is the dictionary with duplicate nodes removed
+               - new_pass_times is the list of pass times
+               - new_speeds is the list of speeds
     """
     # Find duplicates by coordinates
     coord_to_node = {}
@@ -223,7 +235,11 @@ def consolidate_nodes(route, nodes):
         new_node_B = duplicates.get(node_B, node_B)
         new_route.append((new_node_A, new_node_B, distance))
     
-    return new_route, new_nodes
+    # Simply pass through the pass_times and speeds without modification
+    new_pass_times = pass_times
+    new_speeds = speeds
+    
+    return new_route, new_nodes, new_pass_times, new_speeds
     
 
 def generate_and_add_node(new_nodes, point, graph, spatial_index, cell_size):
@@ -290,7 +306,7 @@ def cross_track_distance(point, point_A, point_B):
     d_xt = abs(asin(sin(d13) * sin(theta13 - theta12))) * EARTH_RADIUS_NM
     return d_xt
 
-def find_best_waypoint_for_data_capture(graph, point_A, point_B, prefer_endpoint=None):
+def find_best_waypoint_for_data_capture(graph, point_A, point_B, speed_A, speed_B, passtime_A, passtime_B, prefer_endpoint=None):
     """
     Find the optimal waypoint in the graph near a flight segment for data capture purposes.
     
@@ -298,15 +314,42 @@ def find_best_waypoint_for_data_capture(graph, point_A, point_B, prefer_endpoint
         graph: NetworkX graph containing nodes with lat/lon attributes
         point_A: Tuple (lat, lon) for the first endpoint of the flight segment
         point_B: Tuple (lat, lon) for the second endpoint of the flight segment
+        speed_A: Speed of aircraft at point_A (in nautical miles per second)
+        speed_B: Speed of aircraft at point_B (in nautical miles per second)
+        passtime_A: Time when aircraft is at point_A
+        passtime_B: Time when aircraft is at point_B
         prefer_endpoint: Optional; 'A' or 'B' to prefer nodes in the direction away from the 
                          opposite endpoint, or None to not consider direction (default: None)
     
     Returns:
-        tuple: (best_node, best_score) where best_node is the name of the optimal waypoint
-               and best_score is its combined distance score
+        tuple: (best_node, best_score, best_pass_time) where best_node is the name of the optimal waypoint,
+               best_score is its combined distance score, and best_pass_time is the estimated time
+               the aircraft would pass closest to the waypoint
     """
     best_node = None
     best_score = inf
+    best_pass_time = None
+    best_extension_time = None
+    best_along_track_distance = 0
+    
+    # Calculate total distance between A and B
+    total_distance = haversine_distance(point_A[0], point_A[1], point_B[0], point_B[1])
+    
+    # Calculate the travel speed: if we are at the beginning of the route, use the speed at A,
+    # if we are at the end of the route, use the speed at B, otherwise use the average of the two.
+    if prefer_endpoint == 'A':
+        avg_speed = speed_A
+    elif prefer_endpoint == 'B':
+        avg_speed = speed_B
+    else:
+        avg_speed = (speed_A + speed_B) / 2
+        
+    # Total time to travel the distance between A and B using the average speed
+    if avg_speed > 0:
+        total_time = total_distance / avg_speed # in seconds
+    else:
+        total_time = 0
+    
     for node, data in graph.nodes(data=True):
         if "lat" not in data or "lon" not in data:
             continue
@@ -339,7 +382,34 @@ def find_best_waypoint_for_data_capture(graph, point_A, point_B, prefer_endpoint
         if score < best_score:
             best_score = score
             best_node = node
-    return best_node, best_score
+            
+            # Calculate bearing from A to B and from A to the node
+            bearing_AB = initial_bearing(point_A[0], point_A[1], point_B[0], point_B[1])
+            bearing_AN = initial_bearing(point_A[0], point_A[1], node_point[0], node_point[1])
+            
+            # Convert distances to angular measure (in radians)
+            dist_A_to_node_rad = dist_to_A / EARTH_RADIUS_NM
+            
+            # Calculate the along-track distance using the spherical law of cosines
+            along_track_dist = asin(sin(dist_A_to_node_rad) * sin(bearing_AN - bearing_AB)) * EARTH_RADIUS_NM
+            best_along_track_distance = along_track_dist
+            
+            # Use along-track distance to calculate the pass time
+            if avg_speed >= 0:
+                # Calculate the proportional position along the path (0 at A, 1 at B)
+                path_position = along_track_dist / total_distance
+                # Interpolate the time
+                extension_time = path_position * total_time
+                if prefer_endpoint == 'A':
+                    pass_time_seconds = passtime_A + extension_time
+                elif prefer_endpoint == 'B':
+                    pass_time_seconds = passtime_B + extension_time
+                else:
+                    raise ValueError("Invalid prefer_endpoint value. Must be 'A', 'B', but got: " + str(prefer_endpoint))
+                best_pass_time = pass_time_seconds
+                best_extension_time = extension_time
+                
+    return best_node, best_score, best_pass_time, best_extension_time, avg_speed, abs(best_along_track_distance)
 
 def extract_real_waypoints(draft_route, distance_threshold=20, skip_synthetic_waypoints=True):
     """
@@ -374,6 +444,50 @@ def extract_real_waypoints(draft_route, distance_threshold=20, skip_synthetic_wa
     
     return unique_waypoints
 
+def extract_waypoints_from_augmented_route(augmented_route_object, skip_synthetic_waypoints=False):
+    """
+    Extract waypoints, pass times, and speeds from an augmented route object.
+    
+    Parameters:
+        augmented_route_object: List of tuples in the format
+            (from_node, to_node, distance, passover_time_from, passover_time_to, 
+             speed_from, speed_to)
+        skip_synthetic_waypoints: If True, exclude synthetic waypoints (those starting with '_')
+    
+    Returns:
+        tuple: (route_str, pass_times_str, speeds_str) where:
+               - route_str: String of waypoints separated by spaces
+               - pass_times_str: String of passover times corresponding to each waypoint
+               - speeds_str: String of speeds at each waypoint
+    """
+    waypoints = []
+    pass_times = []
+    speeds = []
+    
+    # Process each segment to extract unique waypoints
+    for i, segment in enumerate(augmented_route_object):
+        from_node, to_node, _, pass_time_from, pass_time_to, speed_from, speed_to = segment
+        
+        # Add from_node if it's not already the last waypoint added and not a synthetic waypoint to be skipped
+        if (not waypoints or from_node != waypoints[-1]) and (not skip_synthetic_waypoints or not from_node.startswith('_')):
+            waypoints.append(from_node)
+            pass_times.append(str(pass_time_from))
+            speeds.append(str(speed_from))
+        
+        # Add to_node if not a synthetic waypoint to be skipped
+        # Only process the last segment's to_node
+        if i == len(augmented_route_object) - 1 and (not skip_synthetic_waypoints or not to_node.startswith('_')):
+            waypoints.append(to_node)
+            pass_times.append(str(pass_time_to))
+            speeds.append(str(speed_to))
+    
+    # Convert lists to space-separated strings
+    route_str = ' '.join(waypoints)
+    pass_times_str = ' '.join(pass_times)
+    speeds_str = ' '.join(speeds)
+    
+    return route_str, pass_times_str, speeds_str
+
 def find_route(graph, segments_df, error_threshold=7.5, distance_threshold_for_segment_skipping=20, max_wp_search_radius=7, min_wp_search_radius=2,
                spatial_index=None, cell_size=0.5):
     """
@@ -397,30 +511,61 @@ def find_route(graph, segments_df, error_threshold=7.5, distance_threshold_for_s
     """
     # import time
     # start_time = time.time()
-    final_route, new_nodes = process_flight_segments(graph, segments_df, error_threshold=error_threshold, max_radius=max_wp_search_radius,
+    final_route, new_nodes, pass_times, speeds = process_flight_segments(graph, segments_df, error_threshold=error_threshold, max_radius=max_wp_search_radius,
                                                      min_radius=min_wp_search_radius, spatial_index=spatial_index, cell_size=cell_size)
-    final_route, new_nodes = consolidate_nodes(final_route, new_nodes)
+    final_route, new_nodes, pass_times, speeds = consolidate_nodes(final_route, new_nodes, pass_times, speeds)
+    
+    augmented_route_object = [] # (node_A, node_B, distance, pass_time_A, pass_time_B, speed_A, speed_B)
+    for i in range(len(final_route)):
+        node_A, node_B, distance = final_route[i]
+        pass_time_A, pass_time_B = pass_times[i]
+        speed_A, speed_B = speeds[i]
+        augmented_route_object.append((node_A, node_B, distance, pass_time_A, pass_time_B, speed_A, speed_B))
+    
     # print(f'Route processed in {time.time() - start_time} seconds')
     
-    # Find the best waypoint for data capture
-    # start_time = time.time()
-    best_starting_point, best_starting_score = find_best_waypoint_for_data_capture(graph, (segments_df.iloc[0]['from_lat'], segments_df.iloc[0]['from_lon']), (segments_df.iloc[0]['to_lat'], segments_df.iloc[0]['to_lon']), prefer_endpoint='A')
-    # print(f'Best starting point found in {time.time() - start_time} seconds')
-    # Add the best waypoint for data capture to the route
-    final_route.insert(0, (best_starting_point, '__XXX__', 0))
-    # print(f'Best starting point: {best_starting_point}')
-    # Find the best endpoint for data capture
-    # start_time = time.time()
-    best_ending_point, best_ending_score = find_best_waypoint_for_data_capture(graph, (segments_df.iloc[-1]['from_lat'], segments_df.iloc[-1]['from_lon']), (segments_df.iloc[-1]['to_lat'], segments_df.iloc[-1]['to_lon']), prefer_endpoint='B')
+    # Find the best waypoint for data capture at the start of the route
+    best_starting_point, best_starting_score, best_starting_pass_time, best_starting_extension_time, best_starting_avg_speed, best_starting_along_track_distance = find_best_waypoint_for_data_capture(graph, (segments_df.iloc[0]['from_lat'], segments_df.iloc[0]['from_lon']), (segments_df.iloc[0]['to_lat'], segments_df.iloc[0]['to_lon']), passtime_A=segments_df.iloc[0]['from_time'], passtime_B=segments_df.iloc[0]['to_time'],
+                                                                                                            speed_A=segments_df.iloc[0]['from_speed'], speed_B=segments_df.iloc[0]['to_speed'], prefer_endpoint='A')
+    # Add the best starting point to the route
+    first_node = augmented_route_object[0][0]
+    first_node_pass_time = augmented_route_object[0][3]
+    first_node_speed = augmented_route_object[0][5]
+    augmented_route_object.insert(0, (
+        best_starting_point,
+        first_node,
+        best_starting_along_track_distance,  # distance
+        best_starting_pass_time,
+        first_node_pass_time,
+        best_starting_avg_speed,
+        first_node_speed
+    ))
+    
+    
+    # Find the best waypoint for data capture at the end of the route
+    best_ending_point, best_ending_score, best_ending_pass_time, best_ending_extension_time, best_ending_avg_speed, best_ending_along_track_distance = find_best_waypoint_for_data_capture(graph, (segments_df.iloc[-1]['from_lat'], segments_df.iloc[-1]['from_lon']), (segments_df.iloc[-1]['to_lat'], segments_df.iloc[-1]['to_lon']), passtime_A=segments_df.iloc[-1]['from_time'], passtime_B=segments_df.iloc[-1]['to_time'],
+                                                                                                            speed_A=segments_df.iloc[-1]['from_speed'], speed_B=segments_df.iloc[-1]['to_speed'], prefer_endpoint='B')
     # Add the best endpoint for data capture to the route
-    final_route.append(('__XXX__', best_ending_point, 0))
-    # print(f'Best ending point: {best_ending_point}')
-    # Extract the real waypoints from the route
-    # start_time = time.time()
-    real_waypoints = extract_real_waypoints(final_route, distance_threshold=distance_threshold_for_segment_skipping, skip_synthetic_waypoints=True)
+    # Get the last node from the current route
+    last_node = augmented_route_object[-1][1]
+    last_node_pass_time = augmented_route_object[-1][4]
+    last_node_speed = augmented_route_object[-1][6]
+    
+    # Add the best ending point to the route
+    augmented_route_object.append((
+        last_node,
+        best_ending_point,
+        best_ending_along_track_distance,  # distance
+        last_node_pass_time,
+        best_ending_pass_time,
+        last_node_speed,
+        best_ending_avg_speed
+    ))
+    
+    real_waypoints = extract_waypoints_from_augmented_route(augmented_route_object, skip_synthetic_waypoints=True)
     # print(f'Real waypoints extracted in {time.time() - start_time} seconds')
     # start_time = time.time()
-    real_full_waypoints = extract_real_waypoints(final_route, distance_threshold=distance_threshold_for_segment_skipping, skip_synthetic_waypoints=False)
+    real_full_waypoints = extract_waypoints_from_augmented_route(augmented_route_object, skip_synthetic_waypoints=False)
     # print(f'Real full waypoints extracted in {time.time() - start_time} seconds')
     # return real_waypoints, final_route, new_nodes
-    return real_waypoints, real_full_waypoints, final_route, new_nodes
+    return real_waypoints, real_full_waypoints, new_nodes

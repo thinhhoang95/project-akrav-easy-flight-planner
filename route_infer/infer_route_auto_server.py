@@ -65,16 +65,16 @@ def process_one_csv_file(args):
             return f"Skipped {csv_file_path} (outputs already exist)"
         
         routes_df = pd.read_csv(csv_file_path)
-        from infer_route5 import find_route, haversine_distance
+        from infer_route51 import find_route, haversine_distance # should be from infer_route5-1
         from tqdm import tqdm
 
         # Get unique flight IDs from the CSV
         flight_ids = routes_df['id'].unique()
         
-        df_all_routes = pd.DataFrame(columns=['flight_id', 'real_waypoints', 'real_full_waypoints'])
+        df_all_routes = pd.DataFrame(columns=['flight_id', 'real_waypoints', 'pass_times', 'speeds', 'real_full_waypoints', 'full_pass_times', 'full_speeds'])
         df_synth_wps = pd.DataFrame(columns=['id', 'lat', 'lon'])
 
-        for flight_id in tqdm(flight_ids, desc=f"Processing {os.path.basename(csv_file_path)}"):
+        for flight_id in tqdm(flight_ids[:10], desc=f"Processing {os.path.basename(csv_file_path)}"):
             selected_flight_df = routes_df[routes_df['id'] == flight_id]
             # Skip route inference if the flight has only one segment
             if len(selected_flight_df) <= 1:
@@ -93,12 +93,16 @@ def process_one_csv_file(args):
             # Skip route if total distance is less than 30 nautical miles
             if route_distance < 30:
                 continue
-            real_waypoints, real_full_waypoints, final_route, new_nodes = find_route(G, selected_flight_df, error_threshold=25,
+            real_waypoints, real_full_waypoints, new_nodes = find_route(G, selected_flight_df, error_threshold=25,
                                                                                 distance_threshold_for_segment_skipping=25, max_wp_search_radius=12, min_wp_search_radius=3,
                                                                                 spatial_index=spatial_index, cell_size=cell_size)
             df_all_routes = pd.concat([df_all_routes, pd.DataFrame({'flight_id': [flight_id],
-                                                                'real_waypoints': ' '.join(real_waypoints),
-                                                                'real_full_waypoints': ' '.join(real_full_waypoints),
+                                                                'real_waypoints': real_waypoints[0],
+                                                                'pass_times': real_waypoints[1],
+                                                                'speeds': real_waypoints[2],
+                                                                'real_full_waypoints': real_full_waypoints[0],
+                                                                'full_pass_times': real_full_waypoints[1],
+                                                                'full_speeds': real_full_waypoints[2],
                                                                 })], ignore_index=True)
 
             # Add synthetic waypoints to df_synth_wps
@@ -116,7 +120,7 @@ def process_one_csv_file(args):
         wps_output_file = os.path.join(output_folder, f"{name_without_ext}.wps.csv")
 
         df_all_routes.to_csv(routes_output_file, index=False)
-        # df_synth_wps.to_csv(wps_output_file, index=False)
+        df_synth_wps.to_csv(wps_output_file, index=False)
 
         return f"Processed {csv_file_path}"
     except Exception as e:
@@ -131,7 +135,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         input_folder = sys.argv[1]
     else:
-        input_folder = os.path.join('routes')
+        input_folder = os.path.join('data', 'routes')
     
     output_folder = os.path.join('output')
     if not os.path.exists(output_folder):
@@ -139,13 +143,29 @@ if __name__ == '__main__':
     
     # Get all CSV files recursively from the input folder
     csv_files = get_all_csv_files(input_folder)
+
+    # Sort CSV files alphabetically
+    csv_files.sort()
     
     # Prepare tasks as (csv_file_path, output_folder) tuples
     tasks = [(csv_file, output_folder) for csv_file in csv_files]
+
+    # Remove files starting with '._' from tasks
+    tasks = [task for task in tasks if not '._' in task[0]]
+
+    # Remove the files with checkpoint in the filename
+    tasks = [task for task in tasks if not 'checkpoint' in task[0]]
+
+    # Pick only one first file for testing
+    tasks = tasks[:1]
+    user_input = input(f'WARNING: Only processing one file for testing. Do you want to continue? (y/n): ')
+    if user_input.lower() != 'y':
+        print("Exiting program.")
+        sys.exit(0)
     
     # Define graph path for worker initialization
-    graph_path = os.path.join('ats_fra_nodes_only.gml')
-    
+    graph_path = os.path.join('data', 'graphs', 'ats_fra_nodes_only.gml')
+
     # Process CSV files using multiprocessing
     pool = multiprocessing.Pool(initializer=init_worker, initargs=(graph_path,))
     results = pool.map(process_one_csv_file, tasks)
