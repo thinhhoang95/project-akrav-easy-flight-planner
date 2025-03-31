@@ -65,16 +65,16 @@ def process_one_csv_file(args):
             return f"Skipped {csv_file_path} (outputs already exist)"
         
         routes_df = pd.read_csv(csv_file_path)
-        from infer_route51 import find_route, haversine_distance # should be from infer_route5-1
+        from infer_route52 import find_route, haversine_distance # should be from infer_route5-1
         from tqdm import tqdm
 
         # Get unique flight IDs from the CSV
         flight_ids = routes_df['id'].unique()
         
-        df_all_routes = pd.DataFrame(columns=['flight_id', 'real_waypoints', 'pass_times', 'speeds', 'real_full_waypoints', 'full_pass_times', 'full_speeds'])
+        df_all_routes = pd.DataFrame(columns=['flight_id', 'real_waypoints', 'pass_times', 'speeds', 'alts', 'real_full_waypoints', 'full_pass_times', 'full_speeds', 'full_alts'])
         df_synth_wps = pd.DataFrame(columns=['id', 'lat', 'lon'])
 
-        for flight_id in tqdm(flight_ids[:10], desc=f"Processing {os.path.basename(csv_file_path)}"):
+        for flight_id in tqdm(flight_ids[:500], desc=f"Processing {os.path.basename(csv_file_path)}"):
             selected_flight_df = routes_df[routes_df['id'] == flight_id]
             # Skip route inference if the flight has only one segment
             if len(selected_flight_df) <= 1:
@@ -100,9 +100,11 @@ def process_one_csv_file(args):
                                                                 'real_waypoints': real_waypoints[0],
                                                                 'pass_times': real_waypoints[1],
                                                                 'speeds': real_waypoints[2],
+                                                                'alts': real_waypoints[3],
                                                                 'real_full_waypoints': real_full_waypoints[0],
                                                                 'full_pass_times': real_full_waypoints[1],
                                                                 'full_speeds': real_full_waypoints[2],
+                                                                'full_alts': real_full_waypoints[3]
                                                                 })], ignore_index=True)
 
             # Add synthetic waypoints to df_synth_wps

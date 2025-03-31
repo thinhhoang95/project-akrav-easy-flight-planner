@@ -37,3 +37,5 @@ ipython_config.py
 # Data folder
 data/
 data/*
+
+output/*.csv

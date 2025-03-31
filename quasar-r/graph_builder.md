@@ -1,0 +1,2 @@
+- routes_df has columns: flight_id	real_waypoints	pass_times	speeds	real_full_waypoints	full_pass_times	full_speeds. Example: 000042HMJ225	INKIM LJLJ LMML MALTI	1680349300.423041 1680364679.0 1680382679.0 16...	0.232055441288291 0.1399177216897295 0.0 0.0	INKIM LJLJ LMML MALTI	1680349300.423041 1680364679.0 1680382679.0 16...	0.232055441288291 0.1399177216897295 0.0 0.0
+- Units: for pass_times: Linux timestamp, speeds are in nautical miles per second.
