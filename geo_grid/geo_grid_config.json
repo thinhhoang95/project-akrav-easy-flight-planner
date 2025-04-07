@@ -1,0 +1,13 @@
+{
+    "min_lat": 30.0,
+    "max_lat": 72.0,
+    "min_lon": -15.0,
+    "max_lon": 40.0,
+    "cell_size_km": 90.0,
+    "delta_lat_deg": 0.8108108108108109,
+    "delta_lon_deg": 1.2883911316749321,
+    "num_rows": 52,
+    "num_cols": 43,
+    "adjusted_max_lat": 72.16216216216216,
+    "adjusted_max_lon": 40.40081866202208
+}
