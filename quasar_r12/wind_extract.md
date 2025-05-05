@@ -74,3 +74,10 @@ Attributes:
 ```
   - The first number is the timestamp, the second one is the altitude, and the third one is the value of the property.
 - Variables: to_add is returned from `prepare_wind_property_args`, thus having the same format.
+- The output of wind_extract is a `RouteContextObject` that describes the tail wind, cross wind components for each edge in the route graph.
+
+```
+Example: Edge (KETIK, JSY):
+  - tail_wind: times 1680307200.0 to 1680393600.0 (9 pts), alts 0.0 to 0.0 (9 pts)
+  - cross_wind: times 1680307200.0 to 1680393600.0 (9 pts), alts 0.0 to 0.0 (9 pts)
+```

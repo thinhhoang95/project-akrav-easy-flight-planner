@@ -2,6 +2,7 @@ import bisect
 import numpy as np
 from math import radians, sin, cos, atan2, sqrt, degrees
 import xarray as xr # Needed for interpolation
+import dill
 
 class GraphRouteContext:
     """
@@ -171,6 +172,50 @@ class GraphRouteContext:
         else:
             raise ValueError(f"Unsupported method '{method}'")
         
+    def save(self, filepath):
+        """
+        Save the GraphRouteContext object to a file using dill.
+
+        Parameters:
+        - filepath: str, the path to the file where the object will be saved.
+        """
+        data_to_save = {
+            'graph': self.graph,
+            'property_data': self._property_data
+        }
+        try:
+            with open(filepath, 'wb') as f:
+                dill.dump(data_to_save, f)
+            print(f"GraphRouteContext saved successfully to {filepath}")
+        except Exception as e:
+            print(f"Error saving GraphRouteContext to {filepath}: {e}")
+
+    @classmethod
+    def load(cls, filepath):
+        """
+        Load a GraphRouteContext object from a file using dill.
+
+        Parameters:
+        - filepath: str, the path to the file from which to load the object.
+
+        Returns:
+        - GraphRouteContext: The loaded object.
+        """
+        try:
+            with open(filepath, 'rb') as f:
+                loaded_data = dill.load(f)
+            
+            instance = cls(loaded_data['graph'])
+            instance._property_data = loaded_data['property_data']
+            print(f"GraphRouteContext loaded successfully from {filepath}")
+            return instance
+        except FileNotFoundError:
+            print(f"Error: File not found at {filepath}")
+            raise
+        except Exception as e:
+            print(f"Error loading GraphRouteContext from {filepath}: {e}")
+            raise
+
     def __str__(self):
         """Return a summary of this context's property data."""
         if not self._property_data:
@@ -187,15 +232,7 @@ class GraphRouteContext:
                 )
         return "\n".join(lines)
     
-    def save(self, path):
-        import pickle
-        with open(path, 'wb') as f:
-            pickle.dump(self, f)
-
-    def load(self, path):
-        import pickle
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+    
         
 def compute_bearing(lat1, lon1, lat2, lon2):
     """
