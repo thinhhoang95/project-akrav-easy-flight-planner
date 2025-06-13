@@ -10,3 +10,5 @@ casadi
 openap
 python_dotenv
 cartopy
+xarray
+dill

@@ -1,10 +1,10 @@
 # path: quasar_r12/eta_solver/eta_uncertainty.py
 import math
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Dict, Callable, Optional
 
 # Assuming eta_solver.py is in the same directory or accessible in the Python path
-from .eta_solver import (
+from eta_solver import (
     Fix, AircraftPerformance, WindVector,
     calculate_distance, calculate_track, calculate_head_tailwind,
     get_climb_tas, get_descent_tas
@@ -79,7 +79,8 @@ def calculate_eta_uncertainty(
 ) -> Dict[str, float]:
     """
     Calculates the standard deviation of the ETA error for each fix based on
-    the derived uncertainty model.
+    summing the variance contributions from each flight segment. This ensures
+    monotonic increase in uncertainty.
 
     Args:
         eta_results: The dictionary returned by calculate_eta.
@@ -98,11 +99,12 @@ def calculate_eta_uncertainty(
     route_fixes = eta_results["route_fixes"]
     eta_by_name = eta_results["eta_by_name"]
     altitude_by_name = eta_results["altitude_by_name"]
-    phase_by_name = eta_results["phase_by_name"] # Get phases for segment GS calc
+    # phase_by_name = eta_results["phase_by_name"] # Phase at fix, less useful now
     toc_inserted_idx = eta_results["toc_inserted_idx"]
     tod_inserted_idx = eta_results["tod_inserted_idx"]
 
     eta_std_dev_minutes_by_name: Dict[str, float] = {}
+    cumulative_variance_hours_sq = 0.0 # Initialize cumulative variance
 
     if not route_fixes:
         return eta_std_dev_minutes_by_name
@@ -112,104 +114,74 @@ def calculate_eta_uncertainty(
     takeoff_time = eta_by_name[takeoff_fix_name]
     eta_std_dev_minutes_by_name[takeoff_fix_name] = 0.0 # No uncertainty at the start
 
-    # Get TOC and TOD times relative to takeoff (in hours)
-    toc_fix_name = route_fixes[toc_inserted_idx].name
-    eta_toc_datetime = eta_by_name[toc_fix_name]
-    t_C_hours = (eta_toc_datetime - takeoff_time).total_seconds() / 3600.0
-
-    t_D_hours = t_C_hours # Default if TOD coincides with TOC or is not found
-    # Check if TOD is distinct and valid index
-    if tod_inserted_idx != toc_inserted_idx and 0 <= tod_inserted_idx < len(route_fixes):
-         tod_fix_name = route_fixes[tod_inserted_idx].name
-         if tod_fix_name in eta_by_name: # Ensure TOD fix exists in results
-             eta_tod_datetime = eta_by_name[tod_fix_name]
-             t_D_hours = (eta_tod_datetime - takeoff_time).total_seconds() / 3600.0
-         else:
-              print(f"Warning: TOD fix '{tod_fix_name}' (index {tod_inserted_idx}) not found in eta_by_name. Using TOC time for TOD.")
-    elif tod_inserted_idx == toc_inserted_idx:
-        # Explicitly handle TOD=TOC case (t_D_hours already set correctly)
-        pass
-
-
-    # Iterate through fixes starting from the second one
+    # Iterate through flight segments (from fix k-1 to fix k)
     for k in range(1, len(route_fixes)):
         fix_k = route_fixes[k]
         fix_k_name = fix_k.name
         fix_prev = route_fixes[k-1]
         fix_prev_name = fix_prev.name
 
-        # Get estimated arrival time at fix k
+        # Get times and altitudes for the segment endpoints
         eta_k_datetime = eta_by_name[fix_k_name]
-        ETA_k_hours = (eta_k_datetime - takeoff_time).total_seconds() / 3600.0
-
-        # Get estimated ground speed approaching fix k (gs for segment k-1 -> k)
+        eta_prev_datetime = eta_by_name[fix_prev_name]
         alt_prev = altitude_by_name[fix_prev_name]
-        eta_prev = eta_by_name[fix_prev_name]
-        # Determine phase *of the segment* based on the phase *at the start* fix
-        # The phase_by_name usually indicates state *at* the fix, infer segment phase
-        segment_phase = "Unknown"
-        if k <= toc_inserted_idx:
-             segment_phase = "Climb"
-         # Check if tod_inserted_idx valid and distinct before checking cruise
-        elif tod_inserted_idx != -1 and tod_inserted_idx != toc_inserted_idx and k <= tod_inserted_idx:
-             segment_phase = "Cruise"
-        elif tod_inserted_idx != -1 : # After TOD (or at TOD if distinct)
-             segment_phase = "Descent"
-        elif toc_inserted_idx != -1 and k > toc_inserted_idx:
-             # Fallback if TOD wasn't distinct: assume cruise/descent based on context
-             # If original ETA calc set TOD=TOC, need descent phase logic here
-             if t_D_hours == t_C_hours and k > toc_inserted_idx: # TOD=TOC case
+
+        # Calculate estimated segment duration (Delta ETA) in hours
+        delta_eta_segment_hours = (eta_k_datetime - eta_prev_datetime).total_seconds() / 3600.0
+
+        segment_time_variance_hours_sq = 0.0 # Variance contribution from this segment
+
+        if delta_eta_segment_hours > 1e-9: # Only calculate variance if time progresses
+            # Determine the phase of the segment (k-1 -> k)
+            segment_phase = "Unknown"
+            if k <= toc_inserted_idx:
+                 segment_phase = "Climb"
+            # Check if tod_inserted_idx valid and distinct before checking cruise
+            elif tod_inserted_idx != -1 and tod_inserted_idx != toc_inserted_idx and k <= tod_inserted_idx:
+                 segment_phase = "Cruise"
+            elif tod_inserted_idx != -1: # After TOD (or at TOD if distinct)
                  segment_phase = "Descent"
-             else: # Should likely be cruise if TOD is later
-                 segment_phase = "Cruise" # Default assumption
+            elif toc_inserted_idx != -1 and k > toc_inserted_idx:
+                 # Fallback if TOD wasn't distinct
+                 if tod_inserted_idx == toc_inserted_idx: # TOD=TOC case
+                     segment_phase = "Descent"
+                 else: # Should likely be cruise if TOD is later
+                     segment_phase = "Cruise" # Default assumption
 
+            # Get estimated ground speed for the segment
+            gs_segment = _calculate_segment_ground_speed(
+                fix_prev, fix_k, eta_prev_datetime, alt_prev, segment_phase,
+                cruise_tas, performance, wind_model
+            )
 
-        gs_k = _calculate_segment_ground_speed(
-            fix_prev, fix_k, eta_prev, alt_prev, segment_phase,
-            cruise_tas, performance, wind_model
-        )
+            if gs_segment > 1e-6: # Avoid division by zero if GS is negligible
+                # Determine TAS variance component based on phase
+                sigma_tas_sq = 0.0
+                if segment_phase == "Climb":
+                    sigma_tas_sq = sigma_tas_climb_sq
+                elif segment_phase == "Cruise":
+                    sigma_tas_sq = sigma_tas_cruise_sq
+                elif segment_phase == "Descent":
+                    sigma_tas_sq = sigma_tas_descent_sq
+                # else: Use average or default? For now, assume 0 if phase unknown
 
-        if gs_k <= 1e-6: # Use a small threshold > 0
-            # If GS is zero (e.g., zero distance), uncertainty is infinite or undefined.
-            # Assign zero uncertainty or skip? Let's assign zero std dev if time hasn't advanced.
-            if ETA_k_hours <= 1e-9:
-                 eta_std_dev_minutes_by_name[fix_k_name] = 0.0
-            else:
-                 # Or propagate previous uncertainty? For now, set to large value or nan
-                 print(f"Warning: Near-zero ground speed calculated approaching {fix_k_name}. Uncertainty calculation may be unreliable.")
-                 eta_std_dev_minutes_by_name[fix_k_name] = float('inf') # Indicate issue
-            continue
+                # Calculate midpoint time relative to takeoff (in hours)
+                t_prev_hours = (eta_prev_datetime - takeoff_time).total_seconds() / 3600.0
+                t_k_hours = (eta_k_datetime - takeoff_time).total_seconds() / 3600.0
+                t_mid_hours = (t_prev_hours + t_k_hours) / 2.0
 
-        # Calculate Var(e_x(ETA_k)) by integrating sigma_gs^2(t)
-        var_ex_k = 0.0
+                # Calculate ground speed error variance for the segment
+                sigma_gs_sq_segment = sigma_tas_sq + k_wind * t_mid_hours
 
-        # --- Climb Phase Contribution ---
-        # Integrate from 0 to min(ETA_k_hours, t_C_hours)
-        upper_c = min(ETA_k_hours, t_C_hours)
-        if upper_c > 0:
-            var_ex_k += sigma_tas_climb_sq * upper_c + 0.5 * k_wind * upper_c**2
+                # Calculate variance added by this segment's time error
+                # Var(Delta Error) approx (Delta ETA / GS)^2 * Var(Delta GS)
+                segment_time_variance_hours_sq = (delta_eta_segment_hours / gs_segment)**2 * sigma_gs_sq_segment
 
-        # --- Cruise Phase Contribution ---
-        # Integrate from t_C_hours to min(ETA_k_hours, t_D_hours)
-        if ETA_k_hours > t_C_hours:
-            lower_r = t_C_hours
-            upper_r = min(ETA_k_hours, t_D_hours)
-            if upper_r > lower_r:
-                 var_ex_k += sigma_tas_cruise_sq * (upper_r - lower_r) + 0.5 * k_wind * (upper_r**2 - lower_r**2)
+        # Add segment variance to cumulative total
+        cumulative_variance_hours_sq += segment_time_variance_hours_sq
 
-        # --- Descent Phase Contribution ---
-        # Integrate from t_D_hours to ETA_k_hours
-        if ETA_k_hours > t_D_hours:
-            lower_d = t_D_hours
-            upper_d = ETA_k_hours
-            if upper_d > lower_d:
-                 var_ex_k += sigma_tas_descent_sq * (upper_d - lower_d) + 0.5 * k_wind * (upper_d**2 - lower_d**2)
-
-        # Calculate Variance of Time Error (in hours^2)
-        var_epsilon_k_hours_sq = var_ex_k / gs_k**2
-
-        # Standard Deviation in hours
-        std_dev_k_hours = math.sqrt(max(0, var_epsilon_k_hours_sq)) # Ensure non-negative
+        # Calculate cumulative standard deviation in hours, ensuring non-negative
+        std_dev_k_hours = math.sqrt(max(0, cumulative_variance_hours_sq))
 
         # Convert to minutes
         std_dev_k_minutes = std_dev_k_hours * 60.0

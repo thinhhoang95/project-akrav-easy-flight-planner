@@ -37,5 +37,6 @@ ipython_config.py
 # Data folder
 data/
 data/*
-
+matched_filtered_data/
+filtered_data/
 output/*.csv
