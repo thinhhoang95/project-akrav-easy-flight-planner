@@ -34,9 +34,19 @@ ipython_config.py
 *.swp
 *.swo
 
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
 # Data folder
 data/
 data/*
 matched_filtered_data/
 filtered_data/
 output/*.csv
+
