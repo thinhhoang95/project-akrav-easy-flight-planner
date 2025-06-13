@@ -13,3 +13,7 @@ Can be converted into:
 `000042HMJ225,INKIM LJLJ LMML MALTI,1680349300.423041 1680364679.0 1680382679.0 1680382679.0,0.232055441288291 0.1399177216897295 0.0 0.0,INKIM LJLJ LMML MALTI,1680349300.423041 1680364679.0 1680382679.0 1680382679.0,0.232055441288291 0.1399177216897295 0.0 0.0`
 
 The `cs` routes can be built from ADS-B data using the scripts in `hlybokiy_potik`, check the guide in that project to know how.
+
+## Prepare training data
+Use `extract_full_flight` to only keep the flights where a full trajectory is available.
+Then use airport_matching_final to make sure the beginning waypoint of these full flights will be at a medium/large airports with scheduled flights. For example: PAR -> LFPG.
