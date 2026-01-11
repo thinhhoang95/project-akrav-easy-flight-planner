@@ -51,3 +51,5 @@ filtered_data/
 output/*.csv
 
 matched_filtered_data_by_origin_region/
+output/most-variable-city-pairs/route_hausdorff_var_summary.json
+output/most-variable-city-pairs/route_hausdorff_var.csv
