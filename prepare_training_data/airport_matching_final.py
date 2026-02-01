@@ -1,3 +1,61 @@
+"""
+Airport matching for flight route training data.
+
+This module processes CSV files of flight routes and replaces the first and last
+waypoints in each route with the nearest airport ICAO code. Matching is done by
+finding the airport whose distance from the waypoint is closest to a target
+distance (default 3.5 nautical miles), using waypoint coordinates from an
+ATS/waypoint graph (GML or GraphML) and airport positions from an airports CSV.
+Supports batch processing with multiprocessing.
+
+What it does
+------------
+- Reads route CSVs that have a ``real_waypoints`` column (space-separated waypoint names).
+- For the first and last waypoint of each route, looks up coordinates in the graph.
+- If the waypoint is not already a 4-letter ICAO code, finds the airport nearest to
+  the target distance from that waypoint (vectorized haversine).
+- Rewrites the route string with the matched airport ICAO at the start/end.
+- Writes new CSVs with prefix ``airport_matched_`` into ``filtered_data/``.
+
+Inputs
+------
+- **Route CSVs**: ``filtered_data/*.csv`` with at least column ``real_waypoints``.
+- **Graph**: GML/GraphML file (e.g. ``data/graphs/ats_fra_nodes_only.gml``) with
+  node attributes for latitude/longitude (e.g. ``lat``/``lon`` or ``latitude``/``longitude``).
+- **Airports**: ``data/airac/airports_high.csv`` with columns ``icao``, ``latitude``, ``longitude``.
+
+Outputs
+-------
+- One CSV per input file: ``filtered_data/airport_matched_<original_filename>.csv``.
+- Same columns as input; only ``real_waypoints`` values may change (first/last replaced by ICAO).
+
+Example (single route)
+----------------------
+Input row::
+
+  real_waypoints: "EDDF NIK GIVMI LEMD"
+
+- First waypoint ``EDDF`` is already a 4-letter ICAO, so it is left unchanged.
+- Last waypoint ``LEMD`` is already ICAO; if the matcher finds a different airport
+  closer to the target distance from that position, it may be replaced (e.g. with
+  another ICAO). Otherwise it stays ``LEMD``.
+
+If the last waypoint were a fix name (e.g. ``XYZ``), it would be replaced by the
+airport whose distance from ``XYZ`` is closest to 3.5 NM::
+
+  real_waypoints: "EDDF NIK GIVMI LEMD"   # after matching
+
+Example (CLI batch)
+------------------
+Run from project root::
+
+  python prepare_training_data/airport_matching_final.py
+
+Configuration (in ``main()``):
+- ``input_directory``: directory containing route CSVs (default ``filtered_data``).
+- ``airports_file``: path to airports CSV (default ``data/airac/airports_high.csv``).
+- ``target_distance``: target distance in nautical miles for matching (default 3.5).
+"""
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,7 +75,17 @@ from functools import partial
 
 
 def find_best_graph_file():
-    """Find the best available graph file, prioritizing comprehensive ones"""
+    """Find the best available ATS/waypoint graph file.
+
+    Checks a fixed list of candidate paths first, then falls back to glob
+    patterns (e.g. ``data/graphs/*.gml``). Used to locate the graph for
+    waypoint coordinate lookups.
+
+    Returns
+    -------
+    str or None
+        Path to an existing graph file (GML or GraphML), or None if none found.
+    """
     graph_candidates = [
         'data/graphs/ats_fra_nodes_only.gml',
         # 'data/graphs/waypoints_graph.graphml',
@@ -45,7 +113,25 @@ def find_best_graph_file():
     return None
 
 def load_graph(graph_file_path):
-    """Load the route graph from GML or GraphML file"""
+    """Load the route graph from a GML or GraphML file.
+
+    Parameters
+    ----------
+    graph_file_path : str
+        Path to a ``.gml`` or ``.graphml`` file.
+
+    Returns
+    -------
+    networkx.Graph
+        Graph with nodes (waypoints) and their attributes.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    ValueError
+        If the file extension is not ``.gml`` or ``.graphml``.
+    """
     if not os.path.exists(graph_file_path):
         raise FileNotFoundError(f"Graph file not found: {graph_file_path}")
     
@@ -57,15 +143,20 @@ def load_graph(graph_file_path):
         raise ValueError(f"Unsupported graph format: {graph_file_path}")
 
 def haversine_vectorized(lat1, lon1, lat2, lon2):
-    """
-    Vectorized haversine distance calculation.
-    
-    Args:
-        lat1, lon1: Arrays of latitudes and longitudes for first set of points
-        lat2, lon2: Arrays of latitudes and longitudes for second set of points
-        
-    Returns:
-        Array of distances in nautical miles
+    """Vectorized haversine distance between point(s) and point(s).
+
+    Parameters
+    ----------
+    lat1, lon1 : array-like
+        Latitude and longitude of the first point(s) (degrees).
+    lat2, lon2 : array-like
+        Latitude and longitude of the second point(s) (degrees).
+        Broadcast with (lat1, lon1) as needed.
+
+    Returns
+    -------
+    np.ndarray
+        Great-circle distances in nautical miles (same shape as broadcast result).
     """
     R = 3440.065  # Earth's radius in nautical miles
     
@@ -81,18 +172,27 @@ def haversine_vectorized(lat1, lon1, lat2, lon2):
     return R * c
 
 def find_nearest_airport_to_target_distance_vectorized(waypoint_lat, waypoint_lon, airports_df, target_distance=3.5):
-    """
-    Find the airport that is closest to being target_distance nautical miles from the waypoint.
-    Uses vectorized operations for better performance.
-    
-    Args:
-        waypoint_lat: Latitude of the waypoint
-        waypoint_lon: Longitude of the waypoint  
-        airports_df: DataFrame containing airport data (icao, latitude, longitude)
-        target_distance: Target distance in nautical miles (default 3.5)
-    
-    Returns:
-        tuple: (closest_airport_icao, actual_distance, distance_diff_from_target)
+    """Find the airport whose distance from the waypoint is closest to target_distance.
+
+    Uses vectorized haversine over all airports; the chosen airport minimizes
+    |distance - target_distance| (in nautical miles).
+
+    Parameters
+    ----------
+    waypoint_lat : float
+        Latitude of the waypoint (degrees).
+    waypoint_lon : float
+        Longitude of the waypoint (degrees).
+    airports_df : pd.DataFrame
+        Must have columns ``icao``, ``latitude``, ``longitude``.
+    target_distance : float, optional
+        Target distance in nautical miles (default 3.5).
+
+    Returns
+    -------
+    tuple
+        (closest_airport_icao, actual_distance_nm, distance_diff_from_target).
+        (None, None, None) if ``airports_df`` is empty.
     """
     if airports_df.empty:
         return None, None, None
@@ -114,15 +214,22 @@ def find_nearest_airport_to_target_distance_vectorized(waypoint_lat, waypoint_lo
     return closest_airport['icao'], actual_distance, distance_diff
 
 def get_waypoint_coordinates(waypoint_name, graph):
-    """
-    Get coordinates of a waypoint from the graph.
-    
-    Args:
-        waypoint_name: Name of the waypoint
-        graph: NetworkX graph containing waypoint nodes with lat/lon attributes
-        
-    Returns:
-        tuple: (lat, lon) or (None, None) if waypoint not found
+    """Get latitude and longitude of a waypoint from the graph.
+
+    Looks for common attribute names: ``lat``/``lon``, ``latitude``/``longitude``,
+    or ``y``/``x`` on the node.
+
+    Parameters
+    ----------
+    waypoint_name : str
+        Node ID (waypoint name) in the graph.
+    graph : networkx.Graph
+        Graph whose nodes have lat/lon-like attributes.
+
+    Returns
+    -------
+    tuple
+        (lat, lon) in degrees, or (None, None) if node missing or no coords found.
     """
     if waypoint_name in graph.nodes:
         node_data = graph.nodes[waypoint_name]
@@ -150,17 +257,29 @@ def get_waypoint_coordinates(waypoint_name, graph):
     return None, None
 
 def process_single_route(route_data, graph, airports_df, target_distance=3.5):
-    """
-    Process a single flight route to replace first and last waypoints with airport matches.
-    
-    Args:
-        route_data: Dictionary containing route information
-        graph: NetworkX graph containing waypoint coordinates
-        airports_df: DataFrame with airport data
-        target_distance: Target distance in nautical miles for airport matching
-        
-    Returns:
-        Dictionary with original data and modified waypoints
+    """Replace first and last waypoints of one route with matched airport ICAO codes.
+
+    Expects ``route_data['real_waypoints']`` to be a space-separated string.
+    Waypoints that are already 4-character ICAO codes are left unchanged.
+    Others are looked up in the graph; if coords exist, the nearest airport
+    to the target distance is used for the first/last position.
+
+    Parameters
+    ----------
+    route_data : dict
+        Single route row (must contain key ``real_waypoints``).
+    graph : networkx.Graph
+        Graph for waypoint coordinate lookups.
+    airports_df : pd.DataFrame
+        Airports with ``icao``, ``latitude``, ``longitude``.
+    target_distance : float, optional
+        Target distance in nautical miles for matching (default 3.5).
+
+    Returns
+    -------
+    dict
+        Copy of ``route_data`` with ``real_waypoints`` updated (first/last
+        possibly replaced by airport ICAO). Unchanged if fewer than 2 waypoints.
     """
     result = route_data.copy()
     
@@ -198,17 +317,27 @@ def process_single_route(route_data, graph, airports_df, target_distance=3.5):
     return result
 
 def process_csv_file(file_path, graph, airports_df, target_distance=3.5):
-    """
-    Process a single CSV file to replace waypoints with airport matches.
-    
-    Args:
-        file_path: Path to the CSV file to process
-        graph: NetworkX graph containing waypoint coordinates
-        airports_df: DataFrame with airport data
-        target_distance: Target distance in nautical miles for airport matching
-        
-    Returns:
-        String: Output file path
+    """Process one route CSV and write an airport-matched version.
+
+    Reads the CSV, runs ``process_single_route`` on each row, and writes
+    ``filtered_data/airport_matched_<basename(file_path)>``. Skips files
+    that do not have a ``real_waypoints`` column.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the input CSV.
+    graph : networkx.Graph
+        Graph for waypoint coordinate lookups.
+    airports_df : pd.DataFrame
+        Airports with ``icao``, ``latitude``, ``longitude``.
+    target_distance : float, optional
+        Target distance in nautical miles (default 3.5).
+
+    Returns
+    -------
+    str or None
+        Output CSV path on success; None if column missing or on error.
     """
     try:
         print(f"Processing: {file_path}")
@@ -246,13 +375,30 @@ def process_csv_file(file_path, graph, airports_df, target_distance=3.5):
         return None
 
 def process_file_wrapper(args):
-    """Wrapper function for multiprocessing"""
+    """Unpack arguments and call process_csv_file for use with multiprocessing.Pool.
+
+    Parameters
+    ----------
+    args : tuple
+        (file_path, graph, airports_df, target_distance).
+
+    Returns
+    -------
+    str or None
+        Same as ``process_csv_file``: output path or None.
+    """
     file_path, graph, airports_df, target_distance = args
     return process_csv_file(file_path, graph, airports_df, target_distance)
 
 def main():
-    """Main function to process all CSV files with multiprocessing"""
-    
+    """Discover CSVs, load graph and airports, and process all files in parallel.
+
+    Reads configuration (input dir, airports file, target_distance), finds
+    all non–airport-matched CSVs in the input directory, loads the graph and
+    airports once, then runs ``process_csv_file`` on each file via a
+    multiprocessing Pool. Writes airport-matched CSVs into ``filtered_data/``
+    and prints a short summary.
+    """
     # Configuration
     input_directory = 'filtered_data'
     input_pattern = os.path.join(input_directory, '*.csv')
