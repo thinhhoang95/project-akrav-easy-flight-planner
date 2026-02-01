@@ -36,7 +36,7 @@ loads the graph once and then processes one or more input CSVs.
 **Example (command line)**
 
   python infer_route_auto_server.py --input data/routes --output output
-  python infer_route_auto_server.py -i /path/to/csv/folder -o /path/to/out --max-ids 1000
+  python infer_route_auto_server.py -i /path/to/csv/folder -o /path/to/out --max-ids 999999
   python infer_route_auto_server.py --input data/routes --output output --limit-files 2  # process only first 2 CSVs
 
 **Example (input CSV snippet)**
