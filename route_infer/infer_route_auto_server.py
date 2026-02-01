@@ -118,14 +118,17 @@ def init_worker(graph_path):
     
     cell_size = 0.5 
     spatial_index = {}
+    graph_latlon_nodes = []
 
     # Build spatial index from existing graph nodes
     for node, data in G.nodes(data=True):
         if "lat" in data and "lon" in data:
+            graph_latlon_nodes.append((node, data["lat"], data["lon"]))
             cell = get_cell(data["lat"], data["lon"], cell_size)
             if cell not in spatial_index:
                 spatial_index[cell] = []
             spatial_index[cell].append((node, data["lat"], data["lon"]))
+    G.graph["latlon_nodes"] = graph_latlon_nodes
 
 def process_one_csv_file(args):
     """
@@ -167,20 +170,50 @@ def process_one_csv_file(args):
             print(f"Skipping {csv_file_path} - output files already exist")
             return f"Skipped {csv_file_path} (outputs already exist)"
         
-        routes_df = pd.read_csv(csv_file_path)
+        required_cols = [
+            "id",
+            "from_lat",
+            "from_lon",
+            "to_lat",
+            "to_lon",
+            "from_time",
+            "to_time",
+            "from_speed",
+            "to_speed",
+            "from_alt",
+            "to_alt",
+        ]
+        routes_df = pd.read_csv(csv_file_path, usecols=required_cols)
         from infer_route52 import find_route, haversine_distance # should be from infer_route5-1
         from tqdm import tqdm
 
-        # Get unique flight IDs from the CSV
-        flight_ids = routes_df['id'].unique()
+        import itertools
+
+        flight_groups = routes_df.groupby("id", sort=False)
+        total_flights = flight_groups.ngroups
         if max_flight_ids is not None:
-            flight_ids = flight_ids[:max_flight_ids]
+            total_flights = min(total_flights, max_flight_ids)
+            flight_groups = itertools.islice(flight_groups, total_flights)
 
-        df_all_routes = pd.DataFrame(columns=['flight_id', 'real_waypoints', 'pass_times', 'speeds', 'alts', 'real_full_waypoints', 'full_pass_times', 'full_speeds', 'full_alts'])
-        df_synth_wps = pd.DataFrame(columns=['id', 'lat', 'lon'])
+        rows = []
+        synth_rows = []
+        routes_columns = [
+            "flight_id",
+            "real_waypoints",
+            "pass_times",
+            "speeds",
+            "alts",
+            "real_full_waypoints",
+            "full_pass_times",
+            "full_speeds",
+            "full_alts",
+        ]
 
-        for flight_id in tqdm(flight_ids, desc=f"Processing {os.path.basename(csv_file_path)}"):
-            selected_flight_df = routes_df[routes_df['id'] == flight_id]
+        for flight_id, selected_flight_df in tqdm(
+            flight_groups,
+            total=total_flights,
+            desc=f"Processing {os.path.basename(csv_file_path)}",
+        ):
             # Skip route inference if the flight has only one segment
             if len(selected_flight_df) <= 1:
                 continue
@@ -201,30 +234,38 @@ def process_one_csv_file(args):
             real_waypoints, real_full_waypoints, new_nodes = find_route(G, selected_flight_df, error_threshold=25,
                                                                                 distance_threshold_for_segment_skipping=25, max_wp_search_radius=12, min_wp_search_radius=3,
                                                                                 spatial_index=spatial_index, cell_size=cell_size)
-            df_all_routes = pd.concat([df_all_routes, pd.DataFrame({'flight_id': [flight_id],
-                                                                'real_waypoints': real_waypoints[0],
-                                                                'pass_times': real_waypoints[1],
-                                                                'speeds': real_waypoints[2],
-                                                                'alts': real_waypoints[3],
-                                                                'real_full_waypoints': real_full_waypoints[0],
-                                                                'full_pass_times': real_full_waypoints[1],
-                                                                'full_speeds': real_full_waypoints[2],
-                                                                'full_alts': real_full_waypoints[3]
-                                                                })], ignore_index=True)
+            rows.append(
+                {
+                    "flight_id": flight_id,
+                    "real_waypoints": real_waypoints[0],
+                    "pass_times": real_waypoints[1],
+                    "speeds": real_waypoints[2],
+                    "alts": real_waypoints[3],
+                    "real_full_waypoints": real_full_waypoints[0],
+                    "full_pass_times": real_full_waypoints[1],
+                    "full_speeds": real_full_waypoints[2],
+                    "full_alts": real_full_waypoints[3],
+                }
+            )
 
             # Add synthetic waypoints to df_synth_wps
             for node_id, node_data in new_nodes.items():
-                df_synth_wps = pd.concat([df_synth_wps, pd.DataFrame({
-                    'id': [node_id],
-                    'lat': [node_data['lat']],
-                    'lon': [node_data['lon']]
-                })], ignore_index=True)
+                synth_rows.append(
+                    {
+                        "id": node_id,
+                        "lat": node_data["lat"],
+                        "lon": node_data["lon"],
+                    }
+                )
 
         # Write the outputs to CSV files in the output folder
         base_name = os.path.basename(csv_file_path)
         name_without_ext = os.path.splitext(base_name)[0]
         routes_output_file = os.path.join(output_folder, f"{name_without_ext}.routes.csv")
         wps_output_file = os.path.join(output_folder, f"{name_without_ext}.wps.csv")
+
+        df_all_routes = pd.DataFrame(rows, columns=routes_columns)
+        df_synth_wps = pd.DataFrame(synth_rows, columns=["id", "lat", "lon"])
 
         df_all_routes.to_csv(routes_output_file, index=False)
         df_synth_wps.to_csv(wps_output_file, index=False)

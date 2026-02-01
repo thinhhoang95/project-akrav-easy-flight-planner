@@ -117,16 +117,16 @@ def process_flight_segments(graph, segments_df, error_threshold=7.5, max_radius=
 
     # start_time = time.time()
     # Process each flight segment (each row in the dataframe).
-    for idx, row in segments_df.iterrows():
+    for row in segments_df.itertuples(index=False):
         # Flight endpoints (using latitude, longitude)
-        point_A = (row["from_lat"], row["from_lon"])
-        point_B = (row["to_lat"], row["to_lon"])
-        time_A = row["from_time"]
-        time_B = row["to_time"]
-        spd_A = row["from_speed"]
-        spd_B = row["to_speed"]
-        alt_A = row["from_alt"]
-        alt_B = row["to_alt"]
+        point_A = (row.from_lat, row.from_lon)
+        point_B = (row.to_lat, row.to_lon)
+        time_A = row.from_time
+        time_B = row.to_time
+        spd_A = row.from_speed
+        spd_B = row.to_speed
+        alt_A = row.from_alt
+        alt_B = row.to_alt
         pass_times.append((time_A, time_B))
         alts.append((alt_A, alt_B))
         speeds.append((spd_A, spd_B))
@@ -357,10 +357,17 @@ def find_best_waypoint_for_data_capture(graph, point_A, point_B, speed_A, speed_
     else:
         total_time = 0
     
-    for node, data in graph.nodes(data=True):
-        if "lat" not in data or "lon" not in data:
-            continue
-        node_point = (data["lat"], data["lon"])
+    latlon_nodes = graph.graph.get("latlon_nodes")
+    if latlon_nodes is None:
+        latlon_nodes = []
+        for node, data in graph.nodes(data=True):
+            if "lat" not in data or "lon" not in data:
+                continue
+            latlon_nodes.append((node, data["lat"], data["lon"]))
+        graph.graph["latlon_nodes"] = latlon_nodes
+
+    for node, node_lat, node_lon in latlon_nodes:
+        node_point = (node_lat, node_lon)
         # Compute the distance from node to each endpoint
         dist_to_A = haversine_distance(node_point[0], node_point[1], point_A[0], point_A[1])
         dist_to_B = haversine_distance(node_point[0], node_point[1], point_B[0], point_B[1])
