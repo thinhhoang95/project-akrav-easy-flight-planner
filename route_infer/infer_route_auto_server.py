@@ -145,10 +145,11 @@ def process_one_csv_file(args):
 
     Parameters
     ----------
-    args : tuple of (str, str, int)
-        (csv_file_path, output_folder, max_flight_ids): path to the input CSV,
-        directory for the two output files, and maximum number of flight IDs to
-        process per file (None = no limit).
+    args : tuple of (str, str, int, bool)
+        (csv_file_path, output_folder, max_flight_ids, skip_existing): path to the
+        input CSV, directory for the two output files, maximum number of flight IDs
+        to process per file (None = no limit), and whether to skip if outputs exist
+        and are non-empty.
 
     Returns
     -------
@@ -157,7 +158,7 @@ def process_one_csv_file(args):
         or "Error processing <path>: <exception>".
     """
     try:
-        csv_file_path, output_folder, max_flight_ids = args
+        csv_file_path, output_folder, max_flight_ids, skip_existing = args
         
         # Check if output files already exist, and skip processing if they do
         base_name = os.path.basename(csv_file_path)
@@ -165,10 +166,10 @@ def process_one_csv_file(args):
         routes_output_file = os.path.join(output_folder, f"{name_without_ext}.routes.csv")
         wps_output_file = os.path.join(output_folder, f"{name_without_ext}.wps.csv")
         
-        # If both output files exist, skip processing this CSV file
-        if os.path.exists(routes_output_file):
-            print(f"Skipping {csv_file_path} - output files already exist")
-            return f"Skipped {csv_file_path} (outputs already exist)"
+        # If output file exists and is non-empty, skip processing this CSV file
+        if skip_existing and os.path.exists(routes_output_file) and os.path.getsize(routes_output_file) > 0:
+            print(f"Skipping {csv_file_path} - output file already exists and is non-empty")
+            return f"Skipped {csv_file_path} (output exists and is non-empty)"
         
         required_cols = [
             "id",
@@ -321,6 +322,11 @@ def parse_args():
         metavar='N',
         help='Number of worker processes. Default: use CPU count.',
     )
+    parser.add_argument(
+        '--no-skip-existing',
+        action='store_true',
+        help='Do not skip CSVs when a non-empty output .routes.csv already exists.',
+    )
     return parser.parse_args()
 
 
@@ -343,7 +349,8 @@ if __name__ == '__main__':
     csv_files = get_all_csv_files(input_folder)
     csv_files.sort()
 
-    tasks = [(path, output_folder, max_flight_ids) for path in csv_files]
+    skip_existing = not args.no_skip_existing
+    tasks = [(path, output_folder, max_flight_ids, skip_existing) for path in csv_files]
     tasks = [t for t in tasks if '._' not in t[0] and 'checkpoint' not in t[0]]
 
     if limit_files is not None:

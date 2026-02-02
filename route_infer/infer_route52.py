@@ -267,11 +267,12 @@ def generate_and_add_node(new_nodes, point, graph, spatial_index, cell_size):
     lat, lon = point
     new_nodes[new_name] = {"lat": lat, "lon": lon}
     # Add new node to the graph so it can be found in subsequent queries
-    # graph.add_node(new_name, lat=lat, lon=lon)
-    # cell = get_cell(lat, lon, cell_size)
-    # if cell not in spatial_index:
-    #     spatial_index[cell] = []
-    # spatial_index[cell].append((new_name, lat, lon))
+    graph.add_node(new_name, lat=lat, lon=lon)
+    cell = get_cell(lat, lon, cell_size)
+    if cell not in spatial_index:
+        spatial_index[cell] = []
+    spatial_index[cell].append((new_name, lat, lon))
+    return new_name
     
     return new_name
 
@@ -545,22 +546,23 @@ def find_route(graph, segments_df, error_threshold=7.5, distance_threshold_for_s
     # Find the best waypoint for data capture at the start of the route
     best_starting_point, best_starting_score, best_starting_pass_time, best_starting_extension_time, best_starting_avg_speed, best_starting_along_track_distance = find_best_waypoint_for_data_capture(graph, (segments_df.iloc[0]['from_lat'], segments_df.iloc[0]['from_lon']), (segments_df.iloc[0]['to_lat'], segments_df.iloc[0]['to_lon']), passtime_A=segments_df.iloc[0]['from_time'], passtime_B=segments_df.iloc[0]['to_time'],
                                                                                                             speed_A=segments_df.iloc[0]['from_speed'], speed_B=segments_df.iloc[0]['to_speed'], prefer_endpoint='A')
-    # Add the best starting point to the route
-    first_node = augmented_route_object[0][0]
-    first_node_pass_time = augmented_route_object[0][3]
-    first_node_speed = augmented_route_object[0][5]
-    first_node_alt = augmented_route_object[0][7]
-    augmented_route_object.insert(0, (
-        best_starting_point,
-        first_node,
-        best_starting_along_track_distance,  # distance
-        best_starting_pass_time,
-        first_node_pass_time,
-        best_starting_avg_speed,
-        first_node_speed,
-        first_node_alt,
-        first_node_alt
-    ))
+    # Add the best starting point to the route if found
+    if best_starting_point is not None:
+        first_node = augmented_route_object[0][0]
+        first_node_pass_time = augmented_route_object[0][3]
+        first_node_speed = augmented_route_object[0][5]
+        first_node_alt = augmented_route_object[0][7]
+        augmented_route_object.insert(0, (
+            best_starting_point,
+            first_node,
+            best_starting_along_track_distance,  # distance
+            best_starting_pass_time,
+            first_node_pass_time,
+            best_starting_avg_speed,
+            first_node_speed,
+            first_node_alt,
+            first_node_alt
+        ))
     
     
     # Find the best waypoint for data capture at the end of the route
@@ -574,17 +576,18 @@ def find_route(graph, segments_df, error_threshold=7.5, distance_threshold_for_s
     last_node_alt = augmented_route_object[-1][8]
     
     # Add the best ending point to the route
-    augmented_route_object.append((
-        last_node,
-        best_ending_point,
-        best_ending_along_track_distance,  # distance
-        last_node_pass_time,
-        best_ending_pass_time,
-        last_node_speed,
-        best_ending_avg_speed,
-        last_node_alt,
-        last_node_alt
-    ))
+    if best_ending_point is not None:
+        augmented_route_object.append((
+            last_node,
+            best_ending_point,
+            best_ending_along_track_distance,  # distance
+            last_node_pass_time,
+            best_ending_pass_time,
+            last_node_speed,
+            best_ending_avg_speed,
+            last_node_alt,
+            last_node_alt
+        ))
     
     real_waypoints = extract_waypoints_from_augmented_route(augmented_route_object, skip_synthetic_waypoints=True)
     # print(f'Real waypoints extracted in {time.time() - start_time} seconds')
